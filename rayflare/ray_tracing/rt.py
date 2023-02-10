@@ -163,7 +163,7 @@ def RT(group, incidence, transmission, surf_name, options, structpath, Fr_or_TMM
             ys = np.linspace(y_limits[0], y_limits[1], ny)
 
         if options['parallel']:
-            allres = Parallel(n_jobs=options['n_jobs'])(delayed(RT_wl)
+            allres = Parallel(n_jobs=options['n_jobs'], prefer="threads")(delayed(RT_wl)
                                                         (i1, wavelengths[i1], n_angles, nx, ny,
                                                          widths, thetas_in, phis_in, h,
                                                          xs, ys, nks, surfaces,
@@ -1185,6 +1185,42 @@ def single_cell_check(r_a, d, ni, nj, tri, Lx, Ly, side, z_cov, pol, n_interacti
             r_a = np.real(
                 intersn + d / 1e9)  # this is to make sure the raytracer doesn't immediately just find the same intersection again
 
+
+def check_intersect_(r_a, d, tri):
+    # all the stuff which is only surface-dependent (and not dependent on incoming direction) is
+    # in the surface object tri.
+    
+    e1 = tri.P_1s - tri.P_0s
+    e2 = tri.P_2s - tri.P_0s
+    N = np.cross(e1, e2);
+    det = -(N @ d[:,None])[:,0]
+    invdet = 1.0/det
+    ao = r_a - tri.P_0s
+    dao = np.cross(ao, d)
+    u =  np.einsum('ij,ij->i', e2, dao) * invdet
+    v =  -np.einsum('ij,ij->i', e1, dao) * invdet
+    t =  np.einsum('ij,ij->i', ao, N) * invdet
+    
+    which_intersect = (t >= 0.0) & (u >= 0.0) & (v >= 0.0) & ((u+v) <= 1.0)
+    
+    if any(which_intersect) > 0:
+
+        t = t[which_intersect]
+        P0 = tri.P_0s[which_intersect]
+        P1 = tri.P_1s[which_intersect]
+        P2 = tri.P_2s[which_intersect]
+        ind = np.argmin(t)
+        t = min(t)
+
+        intersn = r_a + t * d
+        N = np.cross(P1[ind] - P0[ind], P2[ind] - P0[ind])
+        N = N / np.linalg.norm(N)
+
+        theta = atan(np.linalg.norm(np.cross(N, -d)) / np.dot(N, -d))  # in radians, angle relative to plane
+        # print('coords of triangle', P0[ind], P1[ind], P2[ind])
+        return [intersn, theta, N]
+    else:
+        return False
 
 def check_intersect(r_a, d, tri):
     # all the stuff which is only surface-dependent (and not dependent on incoming direction) is
