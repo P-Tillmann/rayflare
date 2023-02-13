@@ -163,22 +163,20 @@ def RT(group, incidence, transmission, surf_name, options, structpath, Fr_or_TMM
             ys = np.linspace(y_limits[0], y_limits[1], ny)
 
         if options['parallel']:
-            lookuptable_local = lookuptable.loc[dict(pol=pol)]
             allres = Parallel(n_jobs=options['n_jobs'], prefer="threads")(delayed(RT_wl)
                                                         (i1, wavelengths[i1], n_angles, nx, ny,
                                                          widths, thetas_in, phis_in, h,
                                                          xs, ys, nks, surfaces,
                                                          pol, phi_sym, theta_intv,
                                                          phi_intv, angle_vector, Fr_or_TMM, n_absorbing_layers,
-                                                         lookuptable_local, calc_profile, depth_spacing, side)
+                                                         lookuptable, calc_profile, depth_spacing, side)
                                                         for i1 in range(len(wavelengths)))
 
         else:
-            lookuptable_local = lookuptable.loc[dict(pol=pol)]
             allres = [RT_wl(i1, wavelengths[i1], n_angles, nx, ny, widths,
                             thetas_in, phis_in, h, xs, ys, nks, surfaces,
                             pol, phi_sym, theta_intv, phi_intv,
-                            angle_vector, Fr_or_TMM, n_absorbing_layers, lookuptable_local, calc_profile, depth_spacing, side)
+                            angle_vector, Fr_or_TMM, n_absorbing_layers, lookuptable, calc_profile, depth_spacing, side)
                       for i1 in range(len(wavelengths))]
 
         allArrays = stack([item[0] for item in allres])
@@ -214,8 +212,17 @@ def RT_wl(i1, wl, n_angles, nx, ny, widths, thetas_in, phis_in, h, xs, ys, nks, 
     phi_out = np.zeros((n_angles, nx * ny))
     A_surface_layers = np.zeros((n_angles, nx * ny, n_abs_layers))
     theta_local_incidence = np.zeros((n_angles, nx * ny))
+     
+    lookuptable_local ={1:
+                        np.vstack([lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=1)].R.data,
+                                   lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=1)].T.data,
+                                   lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=1)].Alayer.data.T]).T,
+                        -1:
+                        np.vstack([lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=-1)].R.data,
+                                   lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=-1)].T.data,
+                                   lookuptable.loc[dict(wl=wl * 1e9, pol=pol,side=-1)].Alayer.data.T]).T,
+                        }
     
-    lookuptable_local = lookuptable.loc[{'wl':wl*1e9}]
 
     for i2 in range(n_angles):
 
@@ -893,7 +900,7 @@ def single_ray_interface(x, y, nks, r_a_0, theta, phi, surfaces, pol, wl, Fr_or_
     stop = False
     I = 1
     
-    lookuptable_loop = lookuptable.loc[{'side':direction}]
+    lookuptable_loop = lookuptable[direction]
     last_direction = direction
 
     # could be done before to avoid recalculating every time
@@ -909,7 +916,7 @@ def single_ray_interface(x, y, nks, r_a_0, theta, phi, surfaces, pol, wl, Fr_or_
         r_a[1] = r_a[1] - surf.Ly * ((r_a[1] + d[1] * (surf.zcov - r_a[2]) / d[2]) // surf.Ly)
         
         if last_direction != direction:
-            lookuptable_loop = lookuptable.loc[{'side':direction}]
+            lookuptable_loop = lookuptable[direction]
             last_direction = direction
 
         res, theta, phi, r_a, d, theta_loc, _, _ = single_interface_check(r_a, d, nks[mat_index],
@@ -995,13 +1002,19 @@ def decide_RT_TMM(n0, n1, theta, d, N, side, pol, rnd, wl, lookuptable):
     #tmp = lookuptable.loc[dict(side=side)]
     #data = tmp.sel(angle=abs(theta), method='nearest')
     
-    data = lookuptable.isel(angle=round(abs(theta)/(np.pi/2)*299))
+    #data = lookuptable.isel(angle=round(abs(theta)/(np.pi/2)*299))
+    
+    data = lookuptable[round(abs(theta)/(np.pi/2)*299)]
     
     #data = tmp.sel(angle=abs(theta), method='nearest')
-    R = data.R.item()#np.real(data['R'].data.item(0))
-    T = data.T.item()#np.real(data['T'].data.item(0))
-    A_per_layer = np.real(data['Alayer'].data)
-
+    #R = data.R.item()#np.real(data['R'].data.item(0))
+    #T = data.T.item()#np.real(data['T'].data.item(0))
+    #A_per_layer = np.real(data['Alayer'].data)
+    
+    R = data[0]
+    T = data[1]
+    A_per_layer = data[2:]
+    
     if rnd <= R:  # REFLECTION
 
         d = np.real(d - 2 * np.dot(d, N) * N)
