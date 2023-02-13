@@ -163,20 +163,22 @@ def RT(group, incidence, transmission, surf_name, options, structpath, Fr_or_TMM
             ys = np.linspace(y_limits[0], y_limits[1], ny)
 
         if options['parallel']:
+            lookuptable_local = lookuptable.loc[dict(pol=pol)]
             allres = Parallel(n_jobs=options['n_jobs'], prefer="threads")(delayed(RT_wl)
                                                         (i1, wavelengths[i1], n_angles, nx, ny,
                                                          widths, thetas_in, phis_in, h,
                                                          xs, ys, nks, surfaces,
                                                          pol, phi_sym, theta_intv,
                                                          phi_intv, angle_vector, Fr_or_TMM, n_absorbing_layers,
-                                                         lookuptable, calc_profile, depth_spacing, side)
+                                                         lookuptable_local, calc_profile, depth_spacing, side)
                                                         for i1 in range(len(wavelengths)))
 
         else:
+            lookuptable_local = lookuptable.loc[dict(pol=pol)]
             allres = [RT_wl(i1, wavelengths[i1], n_angles, nx, ny, widths,
                             thetas_in, phis_in, h, xs, ys, nks, surfaces,
                             pol, phi_sym, theta_intv, phi_intv,
-                            angle_vector, Fr_or_TMM, n_absorbing_layers, lookuptable, calc_profile, depth_spacing, side)
+                            angle_vector, Fr_or_TMM, n_absorbing_layers, lookuptable_local, calc_profile, depth_spacing, side)
                       for i1 in range(len(wavelengths))]
 
         allArrays = stack([item[0] for item in allres])
@@ -212,6 +214,8 @@ def RT_wl(i1, wl, n_angles, nx, ny, widths, thetas_in, phis_in, h, xs, ys, nks, 
     phi_out = np.zeros((n_angles, nx * ny))
     A_surface_layers = np.zeros((n_angles, nx * ny, n_abs_layers))
     theta_local_incidence = np.zeros((n_angles, nx * ny))
+    
+    lookuptable_local = lookuptable.loc[{'wl':wl*1e9}]
 
     for i2 in range(n_angles):
 
@@ -222,7 +226,7 @@ def RT_wl(i1, wl, n_angles, nx, ny, widths, thetas_in, phis_in, h, xs, ys, nks, 
         for c, vals in enumerate(product(xs, ys)):
             _, th_o, phi_o, surface_A = \
                 single_ray_interface(vals[0], vals[1], nks[:, i1],
-                                     r_a_0, theta, phi, surfaces, pol, wl, Fr_or_TMM, lookuptable)
+                                     r_a_0, theta, phi, surfaces, pol, wl, Fr_or_TMM, lookuptable_local)
 
             if th_o < 0:  # can do outside loup with np.where
                 th_o = -th_o
@@ -666,7 +670,9 @@ class RTSurface:
         self.P_0s = Points[tri.simplices[:, 0]]
         self.P_1s = Points[tri.simplices[:, 1]]
         self.P_2s = Points[tri.simplices[:, 2]]
-        self.crossP = np.cross(self.P_1s - self.P_0s, self.P_2s - self.P_0s)
+        self.vec_1s = self.P_1s - self.P_0s
+        self.vec_2s = self.P_2s - self.P_0s
+        self.crossP = np.cross(self.vec_1s, self.vec_2s)
         self.size = self.P_0s.shape[0]
         self.Lx = abs(min(Points[:, 0]) - max(Points[:, 0]))
         self.Ly = abs(min(Points[:, 1]) - max(Points[:, 1]))
@@ -879,13 +885,16 @@ def single_ray_stack(x, y, nks, alphas, r_a_0, surfaces, widths,
 
     return I, profile, A_per_layer, theta, phi, n_passes, n_interactions
 
-
+#@profile
 def single_ray_interface(x, y, nks, r_a_0, theta, phi, surfaces, pol, wl, Fr_or_TMM, lookuptable):
     direction = 1  # start travelling downwards; 1 = down, -1 = up
     mat_index = 0  # start in first medium
     surf_index = 0
     stop = False
     I = 1
+    
+    lookuptable_loop = lookuptable.loc[{'side':direction}]
+    last_direction = direction
 
     # could be done before to avoid recalculating every time
     r_a = r_a_0 + np.array([x, y, 0])
@@ -898,11 +907,15 @@ def single_ray_interface(x, y, nks, r_a_0, theta, phi, surfaces, pol, wl, Fr_or_
 
         r_a[0] = r_a[0] - surf.Lx * ((r_a[0] + d[0] * (surf.zcov - r_a[2]) / d[2]) // surf.Lx)
         r_a[1] = r_a[1] - surf.Ly * ((r_a[1] + d[1] * (surf.zcov - r_a[2]) / d[2]) // surf.Ly)
+        
+        if last_direction != direction:
+            lookuptable_loop = lookuptable.loc[{'side':direction}]
+            last_direction = direction
 
         res, theta, phi, r_a, d, theta_loc, _, _ = single_interface_check(r_a, d, nks[mat_index],
                                                                        nks[mat_index + 1], surf, surf.Lx, surf.Ly,
                                                                        direction,
-                                                                       surf.zcov, pol, 0, wl, Fr_or_TMM, lookuptable)
+                                                                       surf.zcov, pol, 0, wl, Fr_or_TMM, lookuptable_loop)
 
         if res == 0:  # reflection
             direction = -direction  # changing direction due to reflection
@@ -977,11 +990,16 @@ def decide_RT_Fresnel(n0, n1, theta, d, N, side, pol, rnd, wl=None, lookuptable=
 
     return d, side, None  # never absorbed, A = False
 
-
+#@profile
 def decide_RT_TMM(n0, n1, theta, d, N, side, pol, rnd, wl, lookuptable):
-    data = lookuptable.loc[dict(side=side, pol=pol)].sel(angle=abs(theta), wl=wl * 1e9, method='nearest')
-    R = np.real(data['R'].data.item(0))
-    T = np.real(data['T'].data.item(0))
+    #tmp = lookuptable.loc[dict(side=side)]
+    #data = tmp.sel(angle=abs(theta), method='nearest')
+    
+    data = lookuptable.isel(angle=round(abs(theta)/(np.pi/2)*299))
+    
+    #data = tmp.sel(angle=abs(theta), method='nearest')
+    R = data.R.item()#np.real(data['R'].data.item(0))
+    T = data.T.item()#np.real(data['T'].data.item(0))
     A_per_layer = np.real(data['Alayer'].data)
 
     if rnd <= R:  # REFLECTION
@@ -1007,7 +1025,7 @@ def decide_RT_TMM(n0, n1, theta, d, N, side, pol, rnd, wl, lookuptable):
 
     return d, side, A
 
-
+#@profile
 def single_interface_check(r_a, d, ni, nj, tri, Lx, Ly, side, z_cov, pol, n_interactions=0, wl=None, Fr_or_TMM=0,
                            lookuptable=None):
     decide = {0: decide_RT_Fresnel, 1: decide_RT_TMM}
@@ -1034,6 +1052,7 @@ def single_interface_check(r_a, d, ni, nj, tri, Lx, Ly, side, z_cov, pol, n_inte
                 checked_translation = True
 
             else:
+                print('Code not stalled after all')
                 if n_misses < 100:
                     # misses surface. Try again
                     if d[2] < 0:  # coming from above
@@ -1185,21 +1204,24 @@ def single_cell_check(r_a, d, ni, nj, tri, Lx, Ly, side, z_cov, pol, n_interacti
             r_a = np.real(
                 intersn + d / 1e9)  # this is to make sure the raytracer doesn't immediately just find the same intersection again
 
-
-def check_intersect_(r_a, d, tri):
+#@profile
+def check_intersect(r_a, d, tri):
     # all the stuff which is only surface-dependent (and not dependent on incoming direction) is
     # in the surface object tri.
     
-    e1 = tri.P_1s - tri.P_0s
-    e2 = tri.P_2s - tri.P_0s
-    N = np.cross(e1, e2);
-    det = -(N @ d[:,None])[:,0]
+    #e1 = tri.P_1s - tri.P_0s
+    #e2 = tri.P_2s - tri.P_0s
+    #N = np.cross(e1, e2)
+    #det = -(N @ d[:,None])[:,0]
+    
+    det = -np.einsum('ij,j->i', tri.crossP, d)
+    
     invdet = 1.0/det
     ao = r_a - tri.P_0s
     dao = np.cross(ao, d)
-    u =  np.einsum('ij,ij->i', e2, dao) * invdet
-    v =  -np.einsum('ij,ij->i', e1, dao) * invdet
-    t =  np.einsum('ij,ij->i', ao, N) * invdet
+    u =  np.einsum('ij,ij->i', tri.vec_2s, dao) * invdet
+    v =  -np.einsum('ij,ij->i', tri.vec_1s, dao) * invdet
+    t =  np.einsum('ij,ij->i', ao,  tri.crossP) * invdet
     
     which_intersect = (t >= 0.0) & (u >= 0.0) & (v >= 0.0) & ((u+v) <= 1.0)
     
@@ -1222,7 +1244,7 @@ def check_intersect_(r_a, d, tri):
     else:
         return False
 
-def check_intersect(r_a, d, tri):
+def check_intersect_(r_a, d, tri):
     # all the stuff which is only surface-dependent (and not dependent on incoming direction) is
     # in the surface object tri.
     D = np.tile(-d, (tri.size, 1))
@@ -1234,7 +1256,7 @@ def check_intersect(r_a, d, tri):
 
     which_intersect = (u + v <= 1) & (np.all(np.vstack((u, v)) >= -1e-10, axis=0)) & (t > 0)
     # get errors if set exactly to zero.
-    if sum(which_intersect) > 0:
+    if any(which_intersect) > 0:
 
         t = t[which_intersect]
         P0 = tri.P_0s[which_intersect]
